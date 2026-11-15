@@ -1,4 +1,4 @@
-from data_sources import parse_oecd_csv, parse_te_bonds, SNAPSHOT
+from data_sources import parse_oecd_csv, parse_te_bonds, parse_te_country_page, SNAPSHOT
 
 def test_oecd_combined_tax_filter():
     records = parse_oecd_csv(SNAPSHOT.read_bytes())
@@ -22,3 +22,16 @@ def test_te_rejects_unspecified_page():
         pass
     else:
         raise AssertionError('Should reject page without a 10Y yield table')
+
+
+def test_country_page_exact_actual():
+    html='<html><h1>Germany 10-Year Bond Yield</h1><p>Actual</p><span>3.3762</span><p>Daily Change</p><span>0.0506%</span><p>Nov 13, 2026</p></html>'
+    rate, date=parse_te_country_page(html, 'Germany')
+    assert rate == 3.3762
+    assert date == 'Nov 13, 2026'
+
+def test_country_page_rejects_other_country_and_tenor():
+    html='<html><h1>Germany 2-Year Bond Yield</h1><p>Actual 3.3762 Daily Change</p></html>'
+    import pytest
+    with pytest.raises(ValueError): parse_te_country_page(html, 'Germany')
+    with pytest.raises(ValueError): parse_te_country_page(html.replace('Germany','France'), 'Germany')

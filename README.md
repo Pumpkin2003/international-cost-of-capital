@@ -67,3 +67,11 @@ Run the following required application-level checks in the **Export & verificati
 ## Submission
 
 The professor requests (1) GitHub repository link, (2) deployed Streamlit link, (3) snapshots of AI interactions, and (4) a brief independent calculation and one verified AI-generated design or calculation choice. Include a screenshot of the **source diagnostics** when testing live data, and take care not to claim unsuccessful website scraping is a successful live feed.
+
+### Country-yield validation (November 2026 fix)
+
+The app first tries the 10-year bond table and then the country's dedicated Trading Economics 10-year government-bond page. It checks that the second page actually names the selected country and 10-year tenor, and reads the **Actual** yield rather than a forecast or daily change. A response may fail because Trading Economics restricts requests; this is not interpreted as a zero or as a 4% yield.
+
+If a quote cannot be validated, the corresponding manual field is initially blank and must be filled explicitly; calculations cannot run until both yields are supplied. Each target country has an independent manual field to prevent a prior country's rate from being carried over. With United States selected as the target, both sides use the same U.S. 10-year yield. Manual numbers are clearly marked as such and should be associated with their own observation date before submission.
+
+The local calculation and parser tests can be run with `python -m pytest -q`. These tests do not guarantee that Trading Economics will permit requests from a particular Streamlit Cloud deployment.

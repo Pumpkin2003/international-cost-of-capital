@@ -103,3 +103,31 @@ def parse_country_yield_html(html):
                     x=float(c.rstrip('%'))
                     if -5<x<45: return x,'not displayed'
     raise ValueError('10-year yield not identified reliably')
+
+
+def parse_te_country_page(html, country):
+    """Extract the current 'Actual' quote only from a matching 10-year country page.
+
+    Does not infer a value from a forecast, an unrelated asset, or the daily change.
+    """
+    soup=BeautifulSoup(html, 'html.parser')
+    headings=[x.get_text(' ',strip=True) for x in soup.select('h1')]
+    valid_country=re.sub(r'[^a-z0-9]', '', country.lower())
+    accepted_names={valid_country}
+    if country == 'United States': accepted_names.add('us')
+    if country == 'United Kingdom': accepted_names.add('uk')
+    def comparable(s):
+        return re.sub(r'[^a-z0-9]', '', s.lower())
+    if not any(any(n in comparable(h).split('10')[0] for n in accepted_names) and
+               re.search(r'10\s*[- ]?year|10\s*y(?:ear)?\b', h, re.I)
+               for h in headings):
+        raise ValueError(f'Unexpected country/tenor page heading for {country}: {headings[:2]}')
+    plain=soup.get_text(' ',strip=True)
+    match=re.search(r'\bActual\s+(-?\d{1,2}(?:\.\d{1,5})?)\s+(?:Daily Change|Previous|Monthly|Yearly)\b',plain,re.I)
+    if not match:
+        raise ValueError(f'No unambiguous Actual yield on {country} 10Y page')
+    rate=float(match.group(1))
+    if not (-5 < rate < 45):
+        raise ValueError('10Y quote outside reasonable validation range')
+    date_match=re.search(r'\b(\w+\s+\d{1,2},\s+20\d\d)\b',plain,re.I)
+    return rate, (date_match.group(1) if date_match else 'observation date not displayed')

@@ -13,7 +13,7 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from finance import cost_of_capital
-from data_sources import fetch_oecd, parse_te_bonds, BETA_SNAPSHOT, OECD_API
+from data_sources import fetch_oecd, parse_te_bonds, parse_te_country_page, BETA_SNAPSHOT, OECD_API
 
 st.set_page_config(page_title='International Cost of Capital', page_icon='🌐', layout='wide')
 
@@ -131,12 +131,21 @@ def fetch_tax_rates():
 
 
 def fetch_country_yield(country):
-    """Conservative public-page scraping: only a named 10-year table row."""
+    """Try Trading Economics bonds table and country-specific 10-year quote page."""
+    errors=[]
     try:
-        rate, observation_date = parse_te_bonds(get(TE_BONDS).text, country)
-        return rate, f'Trading Economics 10Y table | observed: {observation_date}', None
+        rate, observed = parse_te_bonds(get(TE_BONDS).text, country)
+        return rate, f'Trading Economics 10Y table | observed: {observed}', None
     except Exception as err:
-        return None, 'Trading Economics: quote not validated', str(err)
+        errors.append(f'bonds table: {err}')
+    slug=COUNTRY_TE_SLUGS.get(country, country.lower().replace(' ', '-'))
+    url=f'https://tradingeconomics.com/{slug}/government-bond-yield'
+    try:
+        rate, observed=parse_te_country_page(get(url).text,country)
+        return rate, f'Trading Economics {country} 10Y page | observed: {observed}', None
+    except Exception as err:
+        errors.append(f'country page: {err}')
+    return None, 'Trading Economics: quote not validated', '; '.join(errors)
 
 
 @st.cache_data(ttl=3600,show_spinner='Fetching published sources...')
@@ -180,7 +189,7 @@ with st.sidebar:
     use_foreign_tax=st.toggle('Use selected-country tax rate',value=False,help='Off = U.S. project tax rate. The chosen tax rate applies to both sides.')
 
 us_yield,us_yield_source,us_yield_error,us_checked=quote('United States')
-foreign_yield,foreign_yield_source,foreign_yield_error,foreign_checked=quote(country)
+foreign_yield,foreign_yield_source,foreign_yield_error,foreign_checked=(us_yield,us_yield_source,us_yield_error,us_checked) if country=='United States' else quote(country)
 beta_auto=float(betas.loc[betas.Industry==industry,'Unlevered beta'].iloc[0])
 
 with st.sidebar.expander('Overrides & missing live data',expanded=us_yield is None or foreign_yield is None):
@@ -194,27 +203,46 @@ with st.sidebar.expander('Overrides & missing live data',expanded=us_yield is No
     override_spread=st.checkbox('Manual USD BBB spread')
     spread_us=st.number_input('USD BBB spread (%)',0.0,30.0,float(bbb),0.05,disabled=not override_spread)
     override_us=st.checkbox('Manual U.S. 10Y yield',value=us_yield is None)
-    y_us=st.number_input('U.S. 10Y government yield (%)',-5.0,40.0,float(us_yield if us_yield is not None else 4.0),.05,disabled=not override_us)
-    override_local=st.checkbox('Manual selected-country 10Y yield',value=foreign_yield is None)
-    y_local=st.number_input('Selected-country 10Y government yield (%)',-5.0,40.0,float(foreign_yield if foreign_yield is not None else 4.0),.05,disabled=not override_local)
+    y_us=st.number_input('U.S. 10Y government yield (%)',min_value=-5.0,max_value=40.0,
+                         value=float(us_yield) if us_yield is not None else None,step=.05,
+                         placeholder='Required: enter verified U.S. yield',disabled=not override_us,
+                         key='manual_us_10y')
+    if country=='United States':
+        override_local=False
+        y_local=None
+        st.caption('United States selected: foreign-currency comparison uses the same U.S. yield automatically.')
+    else:
+        override_local=st.checkbox(f'Manual {country} 10Y yield',value=foreign_yield is None,key=f'override_yield_{country}')
+        y_local=st.number_input(f'{country} 10Y government yield (%)',min_value=-5.0,max_value=40.0,
+                                value=float(foreign_yield) if foreign_yield is not None else None,
+                                step=.05,placeholder=f'Required: enter verified {country} yield',
+                                disabled=not override_local,key=f'manual_yield_{country}')
+    if us_yield is None or foreign_yield is None:
+        st.warning('One or more Trading Economics quotes could not be validated. No assumed 4% yield is inserted. Enter the missing values manually using a dated source.')
     override_foreign_spread=st.checkbox('Manual foreign-currency BBB spread',value=False)
-    spread_foreign=st.number_input('Foreign-currency BBB spread (%)',0.0,30.0,float(spread_us * (1 + (foreign_yield if foreign_yield is not None else 4.0)/100)/(1 + (us_yield if us_yield is not None else 4.0)/100)),.05,disabled=not override_foreign_spread,help='Off: automatically convert the USD spread using (1 + foreign yield) / (1 + USD yield). On: change only foreign-side debt and WACC.')
+    spread_foreign=st.number_input('Foreign-currency BBB spread (%)',0.0,30.0,float(spread_us),.05,disabled=not override_foreign_spread,help='Off: automatically convert the USD spread using (1 + foreign yield) / (1 + USD yield). On: change only foreign-side debt and WACC.')
 
 beta_used=beta if override_beta else beta_auto
 spread_used=spread_us if override_spread else bbb
 tax_used=(tax_foreign if override_tax_foreign else taxes.get(country,{'rate':25.0})['rate']) if use_foreign_tax else (tax_us if override_tax_us else taxes.get('United States',{'rate':25.5})['rate'])
 yield_us_used=y_us if override_us else us_yield
-yield_foreign_used=y_local if override_local else foreign_yield
+yield_foreign_used=(y_us if override_us else us_yield) if country=='United States' else (y_local if override_local else foreign_yield)
 spread_foreign_used=spread_foreign if override_foreign_spread else None
 
 if yield_us_used is None or yield_foreign_used is None:
-    st.error('A live 10-year yield could not be retrieved. Enter a manual yield in the sidebar to calculate. No missing quote is presented as live.')
+    st.error('Cannot calculate: a 10-year yield is missing. Open Overrides & missing live data, enter the missing government yield(s), and cite their dates. No default yield is invented.')
+    st.dataframe(pd.DataFrame([
+        {'Country':'United States','Source':us_yield_source,'Diagnostic':us_yield_error or '', 'Manual input':y_us},
+        {'Country':country,'Source':foreign_yield_source,'Diagnostic':foreign_yield_error or '', 'Manual input':y_local if country!='United States' else y_us}
+    ]),hide_index=True,use_container_width=True)
     st.stop()
 
 out=cost_of_capital(beta_used,tax_used,debt,erp,yield_us_used,yield_foreign_used,spread_used,spread_foreign_used)
 
 st.subheader('Project financing comparison')
 st.caption(f'{industry} · {country} · {debt}% debt · {erp:.2f}% equity risk premium · {tax_used:.2f}% common project tax rate')
+if override_us or override_local:
+    st.warning('Manual yield input(s) are active. The displayed WACC is a scenario estimate, NOT a fully verified live-market result. Country-specific overrides do not carry over to other countries.')
 col_us,col_foreign=st.columns(2,gap='large')
 for col,label,result,yield_rate in [(col_us,'🇺🇸 USD',out['usd'],yield_us_used),(col_foreign,f'🌍 {country} currency',out['foreign'],yield_foreign_used)]:
     with col:
@@ -282,8 +310,8 @@ source_rows=[
     {'Input':'Industry unlevered betas','Source':beta_source,'Source date':'Jan 2026 (Damodaran published analysis)','Link':DAMODARAN_BETA_HTML,'Warning':beta_error or ''},
     {'Input':'BBB USD borrowing spread','Source':bbb_source,'Source date':'Jan 2026 (Damodaran published analysis)','Link':DAMODARAN_RATING,'Warning':bbb_error or ''},
     {'Input':'Corporate taxes','Source':tax_source,'Source date':f"US {taxes.get('United States',{}).get('year','N/A')}; selected {taxes.get(country,{}).get('year','N/A')} (observation years)",'Link':OECD_API,'Warning':tax_error or ''},
-    {'Input':'U.S. 10Y yield','Source':us_yield_source,'Source date':us_yield_source+'; retrieved '+us_checked,'Link':TE_BONDS,'Warning':us_yield_error or ''},
-    {'Input':f'{country} 10Y yield','Source':foreign_yield_source,'Source date':foreign_yield_source+'; retrieved '+foreign_checked,'Link':TE_BONDS,'Warning':foreign_yield_error or ''},
+    {'Input':'U.S. 10Y yield','Source':('MANUAL: user-provided' if override_us else us_yield_source),'Source date':us_yield_source+'; retrieved '+us_checked,'Link':TE_BONDS,'Warning':us_yield_error or ''},
+    {'Input':f'{country} 10Y yield','Source':('MANUAL: user-provided' if (override_local or (country=='United States' and override_us)) else foreign_yield_source),'Source date':foreign_yield_source+'; retrieved '+foreign_checked,'Link':TE_BONDS,'Warning':foreign_yield_error or ''},
 ]
 st.dataframe(pd.DataFrame(source_rows),hide_index=True,use_container_width=True)
 if beta_error or bbb_error or tax_error or us_yield_error or foreign_yield_error:
