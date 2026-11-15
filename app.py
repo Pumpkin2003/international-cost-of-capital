@@ -13,6 +13,7 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 from finance import cost_of_capital
+from data_sources import fetch_oecd, parse_te_bonds, BETA_SNAPSHOT, OECD_API
 
 st.set_page_config(page_title='International Cost of Capital', page_icon='🌐', layout='wide')
 
@@ -23,14 +24,14 @@ OECD_2026 = 'https://www.oecd.org/en/data/datasets/corporate-income-tax-rates-da
 OECD_REPORT = 'https://www.oecd.org/en/publications/corporate-tax-statistics-2026_73af6222-en/full-report/statutory-corporate-income-tax-rates_ce84abb9.html'
 TE_BONDS = 'https://tradingeconomics.com/bonds'
 
-# OECD combined statutory reference values for a small selection, not a live feed.
-# These values are explicitly marked as illustrative until verified against OECD.
+# OECD 2026 combined statutory reference rates, checked against lecture slide 550.
+# The app attempts a live retrieval first and labels these published-reference fallbacks.
 REFERENCE_TAX = {
-    'United States':25.6, 'Germany':29.9, 'United Kingdom':25.0,
-    'France':25.8, 'Japan':29.7, 'Canada':26.2, 'Australia':30.0,
-    'Italy':27.8, 'Spain':25.0, 'Netherlands':25.8, 'Switzerland':19.6,
+    'United States':25.5, 'Germany':30.1, 'United Kingdom':25.0,
+    'France':36.1, 'Japan':29.7, 'Canada':26.0, 'Australia':30.0,
+    'Italy':27.8, 'Spain':25.0, 'Netherlands':25.8, 'Switzerland':19.5,
     'Sweden':20.6, 'Norway':22.0, 'Denmark':22.0, 'Ireland':12.5,
-    'Poland':19.0, 'Mexico':30.0, 'South Korea':26.4,
+    'Poland':19.0, 'Mexico':30.0, 'South Korea':27.5,
     'New Zealand':28.0, 'Austria':23.0, 'Belgium':25.0,
     'Finland':20.0, 'Portugal':29.5, 'Brazil':34.0,
     'India':25.2, 'China':25.0, 'Singapore':17.0,
@@ -97,7 +98,11 @@ def fetch_betas():
         return frame,'Damodaran U.S. beta HTML',None
     except Exception as err:
         errors.append(f'HTML: {err}')
-    return pd.DataFrame({'Industry':['Software (System & Application)'], 'Unlevered beta':[1.23]}), 'Reference sample: Damodaran Jan 2026 (NOT refreshed)', '; '.join(errors)
+    try:
+        frame=parse_beta_table(pd.read_excel(BETA_SNAPSHOT,sheet_name=None,header=None).values())
+        return frame,'Bundled Damodaran XLS snapshot (NOT live)', '; '.join(errors)
+    except Exception as err:
+        raise RuntimeError('Industry betas unavailable: '+ '; '.join(errors) + '; snapshot: ' + str(err))
 
 
 def fetch_bbb():
@@ -121,49 +126,17 @@ def fetch_bbb():
 
 
 def fetch_tax_rates():
-    """Attempt machine-readable OECD data; never mislabel reference data as live."""
-    # OECD Data Explorer currently offers SDMX export behind an interactive UI;
-    # the report itself is not a reliable machine-readable country table.
-    # Use a manually curated reference with an explicit 'unverified' label.
-    return REFERENCE_TAX.copy(), 'Reference estimates; verify against OECD 2026', 'OECD web report does not expose a stable country-rate HTML table. Supply or verify the displayed values manually.'
+    """Latest combined statutory CIT observations from OECD; dated local fallback."""
+    return fetch_oecd(get)
 
 
 def fetch_country_yield(country):
-    """Best-effort scrape; Trading Economics can block/dynamically render pages."""
-    slug=COUNTRY_TE_SLUGS.get(country,re.sub(r'[^a-z0-9]+','-',country.lower()).strip('-'))
-    urls=[f'https://tradingeconomics.com/{slug}/government-bond-yield',TE_BONDS]
-    problems=[]
-    for url in urls:
-        try:
-            html=get(url).text
-            soup=BeautifulSoup(html,'html.parser')
-            if url != TE_BONDS:
-                # Individual country page: look for the headline indicator value.
-                for selector in ['#p','[id="p"]','[data-symbol*="10Y"]']:
-                    tag=soup.select_one(selector)
-                    if tag:
-                        val=number(tag.get_text(' ',strip=True))
-                        if -5 < val < 40: return val,url,None
-            else:
-                for tr in soup.select('tr'):
-                    cells=[c.get_text(' ',strip=True) for c in tr.find_all(['td','th'],recursive=False)]
-                    if cells and cells[0].strip().lower() in {country.lower(),country.lower()+' 10y'}:
-                        for cell in cells[1:4]:
-                            try:
-                                val=number(cell)
-                                if -5 < val < 40: return val,url,None
-                            except (AttributeError,ValueError): pass
-                # Some Trading Economics responses serialize quote tables in JSON.
-                for match in re.finditer(r'"(?:Country|Name)"\s*:\s*"'+re.escape(country)+r'"',html,re.I):
-                    excerpt=html[max(0,match.start()-200):match.end()+500]
-                    m=re.search(r'"(?:Last|Price|Value)"\s*:\s*"?([-+]?\d+(?:\.\d+)?)',excerpt,re.I)
-                    if m:
-                        val=float(m.group(1))
-                        if -5 < val < 40: return val,url,None
-            problems.append(f'{url}: no trustworthy displayed 10Y value')
-        except Exception as err:
-            problems.append(f'{url}: {err}')
-    return None,'No live Trading Economics quote','; '.join(problems)
+    """Conservative public-page scraping: only a named 10-year table row."""
+    try:
+        rate, observation_date = parse_te_bonds(get(TE_BONDS).text, country)
+        return rate, f'Trading Economics 10Y table | observed: {observation_date}', None
+    except Exception as err:
+        return None, 'Trading Economics: quote not validated', str(err)
 
 
 @st.cache_data(ttl=3600,show_spinner='Fetching published sources...')
@@ -185,7 +158,7 @@ st.markdown('''<style>
 .caption {color:#64748b;font-size:.86rem}
 </style>''',unsafe_allow_html=True)
 st.title('🌐 International Cost of Capital')
-st.caption('Compare project financing costs in USD and a selected local currency · Academic model')
+st.caption('USD and local-currency cost of equity, borrowing cost & WACC · Lecture-based model')
 
 with st.sidebar:
     st.header('Inputs & data refresh')
@@ -200,7 +173,8 @@ with st.sidebar:
     industries=betas['Industry'].tolist()
     default_industry='Software (System & Application)'
     industry=st.selectbox('Industry',industries,index=industries.index(default_industry) if default_industry in industries else 0)
-    country=st.selectbox('Target country',COUNTRIES,index=COUNTRIES.index('United States'))
+    country_options=sorted(set(COUNTRIES) | set(taxes))
+    country=st.selectbox('Target country',country_options,index=country_options.index('United States'))
     erp=st.number_input('Equity risk premium (%)',min_value=0.0,max_value=50.0,value=6.5,step=.25)
     debt=st.slider('Debt financing (%)',min_value=0,max_value=95,value=30,step=1)
     use_foreign_tax=st.toggle('Use selected-country tax rate',value=False,help='Off = U.S. project tax rate. The chosen tax rate applies to both sides.')
@@ -214,9 +188,9 @@ with st.sidebar.expander('Overrides & missing live data',expanded=us_yield is No
     override_beta=st.checkbox('Manual unlevered beta')
     beta=st.number_input('Unlevered beta',0.0,10.0,beta_auto,0.05,disabled=not override_beta)
     override_tax_us=st.checkbox('Manual U.S. corporate tax',value=False)
-    tax_us=st.number_input('U.S. combined statutory tax (%)',0.0,60.0,float(taxes.get('United States',25.6)),0.1,disabled=not override_tax_us)
+    tax_us=st.number_input('U.S. combined statutory tax (%)',0.0,60.0,float(taxes.get('United States',{'rate':25.5})['rate']),0.1,disabled=not override_tax_us)
     override_tax_foreign=st.checkbox('Manual selected-country corporate tax',value=country not in taxes)
-    tax_foreign=st.number_input('Selected-country tax (%)',0.0,60.0,float(taxes.get(country,25.0)),0.1,disabled=not override_tax_foreign)
+    tax_foreign=st.number_input('Selected-country tax (%)',0.0,60.0,float(taxes.get(country,{'rate':25.0})['rate']),0.1,disabled=not override_tax_foreign)
     override_spread=st.checkbox('Manual USD BBB spread')
     spread_us=st.number_input('USD BBB spread (%)',0.0,30.0,float(bbb),0.05,disabled=not override_spread)
     override_us=st.checkbox('Manual U.S. 10Y yield',value=us_yield is None)
@@ -224,11 +198,11 @@ with st.sidebar.expander('Overrides & missing live data',expanded=us_yield is No
     override_local=st.checkbox('Manual selected-country 10Y yield',value=foreign_yield is None)
     y_local=st.number_input('Selected-country 10Y government yield (%)',-5.0,40.0,float(foreign_yield if foreign_yield is not None else 4.0),.05,disabled=not override_local)
     override_foreign_spread=st.checkbox('Manual foreign-currency BBB spread',value=False)
-    spread_foreign=st.number_input('Foreign-currency BBB spread (%)',0.0,30.0,float(spread_us),.05,disabled=not override_foreign_spread,help='Off: use the same BBB spread as USD. On: only foreign-side debt cost changes.')
+    spread_foreign=st.number_input('Foreign-currency BBB spread (%)',0.0,30.0,float(spread_us * (1 + (foreign_yield if foreign_yield is not None else 4.0)/100)/(1 + (us_yield if us_yield is not None else 4.0)/100)),.05,disabled=not override_foreign_spread,help='Off: automatically convert the USD spread using (1 + foreign yield) / (1 + USD yield). On: change only foreign-side debt and WACC.')
 
 beta_used=beta if override_beta else beta_auto
 spread_used=spread_us if override_spread else bbb
-tax_used=(tax_foreign if override_tax_foreign else taxes.get(country,25.0)) if use_foreign_tax else (tax_us if override_tax_us else taxes.get('United States',25.6))
+tax_used=(tax_foreign if override_tax_foreign else taxes.get(country,{'rate':25.0})['rate']) if use_foreign_tax else (tax_us if override_tax_us else taxes.get('United States',{'rate':25.5})['rate'])
 yield_us_used=y_us if override_us else us_yield
 yield_foreign_used=y_local if override_local else foreign_yield
 spread_foreign_used=spread_foreign if override_foreign_spread else None
@@ -253,15 +227,17 @@ for col,label,result,yield_rate in [(col_us,'🇺🇸 USD',out['usd'],yield_us_u
 
 st.caption(f"Relevered equity beta: {out['levered_beta']:.4f} · D/E = {debt/(100-debt):.4f} · Selected project tax jurisdiction: {'Foreign' if use_foreign_tax else 'United States'}")
 
-with st.expander('Formulas and assumptions',expanded=True):
+with st.expander('Calculation method (International Valuation lecture slides 574, 577, 583-585)',expanded=False):
     st.markdown(r'''
 - **Relevered beta:** $\beta_L = \beta_U[1+(1-T)(D/E)]$ with $D/E = w_D/(1-w_D)$.
-- **Cost of equity (each currency):** $k_e = y_{10Y}+\beta_L ERP$.
-- **Pre-tax cost of debt:** $k_d=y_{10Y}+s_{BBB}$.
+- **USD cost of equity:** $k_{e,USD}=y_{USD}+\beta_L\cdot ERP$.
+- **Foreign cost of equity:** $1+k_{e,F}=(1+k_{e,USD})(1+y_F)/(1+y_{USD})$ (rates as decimals).
+- **USD pretax cost of debt:** $k_{d,USD}=y_{USD}+s_{USD}$.
+- **Foreign BBB spread (automatic):** $s_F=s_{USD}(1+y_F)/(1+y_{USD})$; then $k_{d,F}=y_F+s_F$.
 - **WACC:** $WACC=(1-w_D)k_e+w_Dk_d(1-T)$.
 - The same project tax rate, debt share, ERP and relevered beta are used for both currencies.
-- Foreign BBB spread **defaults to the USD BBB spread**; switching on the foreign spread override affects only foreign debt and WACC.
-- These are classroom **proxy assumptions**, not arbitrage-free FX conversion of nominal discount rates. Country-specific sovereign risk, inflation, currency premia and debt-credit differences are not modeled. Replace formulas if your professor specifies a different method.
+- When enabled, the manual foreign spread override affects only foreign debt cost and foreign WACC.
+- The foreign-currency conversion follows the **International Valuation lecture, slides 583–585**. Government yields are proxies; the model assumes a common project tax rate, leverage ratio and ERP, and no separate country equity risk premium.
 - Corporate statutory rates are headline rates; actual project taxation can differ.
 ''')
 
@@ -281,7 +257,7 @@ st.subheader('Export & verification')
 output=pd.DataFrame([{'Industry':industry,'Country':country,'Tax jurisdiction':'Foreign' if use_foreign_tax else 'United States','Tax (%)':tax_used,
                       'ERP (%)':erp,'Debt share (%)':debt,'Unlevered beta':beta_used,'Levered beta':out['levered_beta'],
                       'U.S. 10Y yield (%)':yield_us_used,'Foreign 10Y yield (%)':yield_foreign_used,
-                      'U.S. BBB spread (%)':spread_used,'Foreign BBB spread (%)':spread_foreign if override_foreign_spread else spread_used,
+                      'U.S. BBB spread (%)':spread_used,'Foreign BBB spread (%)':out['foreign_spread_used'],
                       'USD cost of equity (%)':out['usd']['cost_equity'],'USD debt cost (%)':out['usd']['cost_debt'],'USD WACC (%)':out['usd']['wacc'],
                       'Foreign cost of equity (%)':out['foreign']['cost_equity'],'Foreign debt cost (%)':out['foreign']['cost_debt'],'Foreign WACC (%)':out['foreign']['wacc'],
                       'Fetched / checked at (UTC)':fetch_time}])
@@ -300,16 +276,16 @@ with st.expander('Verify three required invariants'):
     }
     for name,pair in checks.items(): st.write(('✅' if pair else '❌')+' '+name)
 
-st.subheader('Sources, observations & freshness')
-st.caption(f'Latest fetch attempt: {fetch_time}. This is the retrieval time, NOT necessarily the source observation date. Data is cached for up to 60 minutes (TE quotes: 10 minutes).')
+st.subheader('Data sources & observation dates')
+st.caption(f'Latest fetch attempt: {fetch_time}. This is NOT the observation date. Data is cached up to 60 minutes (bond quotes: 10 minutes). A manual value is not a live quote.')
 source_rows=[
     {'Input':'Industry unlevered betas','Source':beta_source,'Source date':'Jan 2026 (Damodaran published analysis)','Link':DAMODARAN_BETA_HTML,'Warning':beta_error or ''},
     {'Input':'BBB USD borrowing spread','Source':bbb_source,'Source date':'Jan 2026 (Damodaran published analysis)','Link':DAMODARAN_RATING,'Warning':bbb_error or ''},
-    {'Input':'Corporate taxes','Source':tax_source,'Source date':'2026 OECD database (reference estimates NOT verified)','Link':OECD_2026,'Warning':tax_error or ''},
-    {'Input':'U.S. 10Y yield','Source':us_yield_source,'Source date':us_checked+' (retrieval time; quote date unavailable)','Link':TE_BONDS,'Warning':us_yield_error or ''},
-    {'Input':f'{country} 10Y yield','Source':foreign_yield_source,'Source date':foreign_checked+' (retrieval time; quote date unavailable)','Link':TE_BONDS,'Warning':foreign_yield_error or ''},
+    {'Input':'Corporate taxes','Source':tax_source,'Source date':f"US {taxes.get('United States',{}).get('year','N/A')}; selected {taxes.get(country,{}).get('year','N/A')} (observation years)",'Link':OECD_API,'Warning':tax_error or ''},
+    {'Input':'U.S. 10Y yield','Source':us_yield_source,'Source date':us_yield_source+'; retrieved '+us_checked,'Link':TE_BONDS,'Warning':us_yield_error or ''},
+    {'Input':f'{country} 10Y yield','Source':foreign_yield_source,'Source date':foreign_yield_source+'; retrieved '+foreign_checked,'Link':TE_BONDS,'Warning':foreign_yield_error or ''},
 ]
 st.dataframe(pd.DataFrame(source_rows),hide_index=True,use_container_width=True)
 if beta_error or bbb_error or tax_error or us_yield_error or foreign_yield_error:
-    st.warning('Some inputs could not be verified from live machine-readable sources. Inspect source warnings above and use manual overrides. Reference values are not live observations.')
+    st.info('Some sources were unavailable or used a dated snapshot. Check the specific warning and observation year in the source table.')
 st.markdown(f'**Primary sources:** [Damodaran industry betas]({DAMODARAN_BETA}) · [Damodaran BBB spread]({DAMODARAN_RATING}) · [OECD 2026 taxes]({OECD_REPORT}) · [Trading Economics 10Y bonds]({TE_BONDS})')

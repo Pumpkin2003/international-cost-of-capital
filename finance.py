@@ -1,4 +1,7 @@
-"""Finance model: percentage values are entered as percent points, e.g. 6.5."""
+"""International cost of capital model based on lecture slides 574, 577, 583-585.
+
+Rate arguments and outputs are percent points: 6.5 means 6.5%.
+"""
 
 def cost_of_capital(beta_u, tax_pct, debt_share_pct, erp_pct,
                     us_yield_pct, local_yield_pct, us_spread_pct,
@@ -11,14 +14,27 @@ def cost_of_capital(beta_u, tax_pct, debt_share_pct, erp_pct,
         raise ValueError('Tax rate must be between 0 and 100%.')
     if beta_u < 0:
         raise ValueError('Unlevered beta cannot be negative.')
-    spread_foreign = us_spread_pct if foreign_spread_pct is None else foreign_spread_pct
-    debt_to_equity = debt / (1 - debt)
-    beta_l = beta_u * (1 + (1 - tax) * debt_to_equity)
-    def one(yield_pct, spread_pct):
-        ke = yield_pct + beta_l * erp_pct
-        kd = yield_pct + spread_pct
-        wacc = (1 - debt) * ke + debt * kd * (1 - tax)
-        return {'cost_equity':ke, 'cost_debt':kd, 'wacc':wacc}
-    return {'levered_beta':beta_l,
-            'usd':one(us_yield_pct, us_spread_pct),
-            'foreign':one(local_yield_pct, spread_foreign)}
+    if (1 + us_yield_pct / 100) <= 0 or (1 + local_yield_pct / 100) <= 0:
+        raise ValueError('Gross government yield factors must be positive.')
+
+    beta_l = beta_u * (1 + (1 - tax) * debt / (1 - debt))
+    factor = (1 + local_yield_pct / 100) / (1 + us_yield_pct / 100)
+    ke_us = us_yield_pct + beta_l * erp_pct
+    kd_us = us_yield_pct + us_spread_pct
+    # Slide 583: convert the entire gross equity return, not just its risk-free portion.
+    ke_local = 100 * ((1 + ke_us / 100) * factor - 1)
+    # Slide 584: convert the credit spread by the gross government-yield ratio.
+    auto_local_spread = us_spread_pct * factor
+    local_spread = auto_local_spread if foreign_spread_pct is None else foreign_spread_pct
+    kd_local = local_yield_pct + local_spread
+
+    def report(ke, kd):
+        return {'cost_equity':ke, 'cost_debt':kd,
+                'wacc':(1 - debt) * ke + debt * kd * (1 - tax)}
+
+    return {'levered_beta': beta_l,
+            'conversion_factor': factor,
+            'auto_foreign_spread': auto_local_spread,
+            'foreign_spread_used': local_spread,
+            'usd':report(ke_us,kd_us),
+            'foreign':report(ke_local,kd_local)}
