@@ -131,3 +131,48 @@ def parse_te_country_page(html, country):
         raise ValueError('10Y quote outside reasonable validation range')
     date_match=re.search(r'\b(\w+\s+\d{1,2},\s+20\d\d)\b',plain,re.I)
     return rate, (date_match.group(1) if date_match else 'observation date not displayed')
+
+
+TE_COUNTRY_LIST_URL = 'https://tradingeconomics.com/country-list/government-bond-10y'
+
+def parse_te_country_list(html):
+    """Return named 10Y yields from the TE World country table.
+
+    The source often rounds quotes to two decimals and gives a monthly
+    reference date. That precision/date are deliberately retained as metadata.
+    Rejects unrelated numeric rows (including occasional ad/report rows).
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    result = {}
+    for table in soup.select('table'):
+        trs = table.select('tr')
+        for hix, tr in enumerate(trs[:5]):
+            headers = [re.sub(r'\s+', ' ', x.get_text(' ', strip=True)).lower().strip()
+                       for x in tr.find_all(['th', 'td'], recursive=False)]
+            def col(prefix):
+                return next((i for i, v in enumerate(headers) if v.startswith(prefix)), None)
+            name_i, rate_i, date_i, unit_i = col('country'), col('last'), col('reference'), col('unit')
+            if name_i is None or rate_i is None or date_i is None or unit_i is None:
+                continue
+            for row in trs[hix+1:]:
+                cells = [x.get_text(' ', strip=True) for x in row.find_all(['td','th'],recursive=False)]
+                if len(cells) <= max(name_i,rate_i,date_i,unit_i):
+                    continue
+                name = re.sub(r'\s+', ' ', cells[name_i]).strip()
+                if not name or name.lower() in {'report', 'country list', 'euro area'}:
+                    continue
+                if cells[unit_i] != '%':
+                    continue
+                value = cells[rate_i].replace(',', '').strip()
+                if not re.fullmatch(r'-?\d+(?:\.\d+)?',value):
+                    continue
+                rate = float(value)
+                if not -5 < rate < 45:
+                    continue
+                date = cells[date_i].strip()
+                if not re.fullmatch(r'[A-Za-z]{3}/\d{2}',date):
+                    continue
+                result[name] = {'rate':rate, 'observed':date, 'source':TE_COUNTRY_LIST_URL}
+            if len(result) >= 15:
+                return result
+    raise ValueError('No usable government-bond 10Y country-list table available')

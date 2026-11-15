@@ -11,9 +11,10 @@ from urllib.parse import quote
 import pandas as pd
 import requests
 import streamlit as st
+import pycountry
 from bs4 import BeautifulSoup
 from finance import cost_of_capital
-from data_sources import fetch_oecd, parse_te_bonds, parse_te_country_page, BETA_SNAPSHOT, OECD_API
+from data_sources import fetch_oecd, parse_te_bonds, parse_te_country_page, parse_te_country_list, TE_COUNTRY_LIST_URL, BETA_SNAPSHOT, OECD_API
 
 st.set_page_config(page_title='International Cost of Capital', page_icon='🌐', layout='wide')
 
@@ -145,7 +146,22 @@ def fetch_country_yield(country):
         return rate, f'Trading Economics {country} 10Y page | observed: {observed}', None
     except Exception as err:
         errors.append(f'country page: {err}')
+    # Coverage extension: the TE 10Y-by-country table contains significantly
+    # more countries than the shorter major-bonds page. No hardcoded yields.
+    try:
+        observations = get_te_country_list()
+        match = observations.get(country)
+        if match is not None:
+            return match['rate'], f'Trading Economics 10Y country list | observed: {match["observed"]} (monthly; rounded quote)', None
+        errors.append('country list: selected country not published')
+    except Exception as err:
+        errors.append(f'country list: {err}')
     return None, 'Trading Economics: quote not validated', '; '.join(errors)
+
+
+@st.cache_data(ttl=600,show_spinner='Fetching broader country yield coverage...')
+def get_te_country_list():
+    return parse_te_country_list(get(TE_COUNTRY_LIST_URL).text)
 
 
 @st.cache_data(ttl=3600,show_spinner='Fetching published sources...')
@@ -174,6 +190,7 @@ with st.sidebar:
     if st.button('↻ Refresh source data',use_container_width=True):
         get_sources.clear()
         quote.clear()
+        get_te_country_list.clear()
         st.rerun()
 
 betas,beta_source,beta_error,bbb,bbb_source,bbb_error,taxes,tax_source,tax_error,fetch_time=get_sources()
@@ -182,8 +199,24 @@ with st.sidebar:
     industries=betas['Industry'].tolist()
     default_industry='Software (System & Application)'
     industry=st.selectbox('Industry',industries,index=industries.index(default_industry) if default_industry in industries else 0)
-    country_options=sorted(set(COUNTRIES) | set(taxes))
+    # ISO countries preserve the professor's 'any country' choice. Availability
+    # is determined separately from actually published 10Y observations.
+    iso_names = {item.name for item in pycountry.countries}
+    iso_names -= {'United States', 'United Kingdom'}  # canonical labels retained below
+    alias_names = {'United States', 'United Kingdom', 'South Korea', 'Czech Republic',
+                   'Turkey', 'Vietnam', 'Russia', 'Taiwan', 'Bolivia', 'Tanzania'}
+    available_te = {}
+    te_list_error = None
+    try:
+        available_te = get_te_country_list()
+    except Exception as err:
+        te_list_error = str(err)
+    country_options = sorted((set(COUNTRIES) | set(taxes) | iso_names | alias_names | set(available_te)) - {'Euro area'})
     country=st.selectbox('Target country',country_options,index=country_options.index('United States'))
+    if country in available_te:
+        st.caption('10Y yield listed by Trading Economics (automatic quote available).')
+    else:
+        st.caption('This country may need a manual 10Y yield if no validated country quote is available.')
     erp=st.number_input('Equity risk premium (%)',min_value=0.0,max_value=50.0,value=6.5,step=.25)
     debt=st.slider('Debt financing (%)',min_value=0,max_value=95,value=30,step=1)
     use_foreign_tax=st.toggle('Use selected-country tax rate',value=False,help='Off = U.S. project tax rate. The chosen tax rate applies to both sides.')
@@ -316,4 +349,4 @@ source_rows=[
 st.dataframe(pd.DataFrame(source_rows),hide_index=True,use_container_width=True)
 if beta_error or bbb_error or tax_error or us_yield_error or foreign_yield_error:
     st.info('Some sources were unavailable or used a dated snapshot. Check the specific warning and observation year in the source table.')
-st.markdown(f'**Primary sources:** [Damodaran industry betas]({DAMODARAN_BETA}) · [Damodaran BBB spread]({DAMODARAN_RATING}) · [OECD 2026 taxes]({OECD_REPORT}) · [Trading Economics 10Y bonds]({TE_BONDS})')
+st.markdown(f'**Primary sources:** [Damodaran industry betas]({DAMODARAN_BETA}) · [Damodaran BBB spread]({DAMODARAN_RATING}) · [OECD 2026 taxes]({OECD_REPORT}) · [Trading Economics 10Y bonds]({TE_BONDS}) · [Trading Economics full 10Y country list]({TE_COUNTRY_LIST_URL})')

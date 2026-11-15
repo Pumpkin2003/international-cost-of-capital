@@ -75,3 +75,11 @@ The app first tries the 10-year bond table and then the country's dedicated Trad
 If a quote cannot be validated, the corresponding manual field is initially blank and must be filled explicitly; calculations cannot run until both yields are supplied. Each target country has an independent manual field to prevent a prior country's rate from being carried over. With United States selected as the target, both sides use the same U.S. 10-year yield. Manual numbers are clearly marked as such and should be associated with their own observation date before submission.
 
 The local calculation and parser tests can be run with `python -m pytest -q`. These tests do not guarantee that Trading Economics will permit requests from a particular Streamlit Cloud deployment.
+
+
+### Broader country coverage (November 2026)
+
+- The country selector includes ISO countries, OECD tax jurisdictions, and all countries discovered from the Trading Economics public 10Y country list. Countries without a published 10Y benchmark remain selectable but require an explicitly sourced manual override.
+- Bond retrieval tries the major bond table and the country-specific 10Y page for a precise quote, then the broader [Trading Economics country list](https://tradingeconomics.com/country-list/government-bond-10y). The country list usually rounds yields to two decimal places and publishes month-level *Reference* dates: the app displays those limitations transparently.
+- The list is fetched anew after the Refresh button; no yield is invented for absent countries. The browser-friendly public HTML may be blocked or changed by the website, so the code retains the manual override fallback.
+- Every newly added source needs observation date and provenance. This is not a guarantee of a live quote for all sovereign states.
